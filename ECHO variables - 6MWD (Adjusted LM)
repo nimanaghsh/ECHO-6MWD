@@ -1,0 +1,58 @@
+Mean EF - 6MWD (adjusted for Age, Sex, Race, HIV, Resp infection , Hep C, Anemia, IVUD, PFT Status, DLCO Status, DM, Smoking)
+
+# Step 0: Required package
+library(dplyr)
+
+# Step 1: Create derived variables
+data$lv_ef_mean <- rowMeans(data[, c("lv_ef_ll", "lv_ef_ul")], na.rm = TRUE)
+data$tb_pcp_pna <- with(data, ifelse(d16_tb == 1 | d17_pcp == 1 | d18_pneumonia == 1, 1, 0))
+data$hgb_abnormal <- with(data, ifelse((sex == 0 & hgb_pft_1 < 13.5) | (sex == 1 & hgb_pft_1 < 12), 1, 0))
+
+# Step 2: Define echo variables
+echo_vars <- c(
+  "lv_dia_diam", "lv_sys_diam", "lv_septal_thickness", "lv_post_wall_thickness", "aortic_root_size",
+  "la_diam", "lv_ef_ll", "lv_ef_ul", "lv_ef_mean", "trv", "rap", "pasp"
+)
+
+# Step 3: Define covariates
+categorical_vars <- c("race_id_der", "g9_hepatitis_c", "sex", "a1_hiv_st",
+                      "ivdu_status_der", "g1_diabetes", "tb_pcp_pna",
+                      "smoke_status_der", "post_spiro_stat_gli_pft_1_der",
+                      "dlco_stat_binary_neas_pft_1_der", "hgb_abnormal")
+continuous_vars <- c("age_tte_der")
+
+# Step 4: Initialize results table
+results_all <- data.frame()
+
+# Step 5: Loop through each echo variable
+for (var in echo_vars) {
+  formula <- as.formula(paste("dist_meters_1 ~", var, "+", 
+                              paste(c(categorical_vars, continuous_vars), collapse = " + ")))
+  
+  sub_data <- data[complete.cases(data[, c("dist_meters_1", var, categorical_vars, continuous_vars)]), ]
+  
+  # Fit models
+  model_overall <- lm(formula, data = sub_data)
+  model_hiv_pos <- lm(formula, data = filter(sub_data, a1_hiv_st == 1))
+  model_hiv_neg <- lm(formula, data = filter(sub_data, a1_hiv_st == 0))
+  
+  # Extract results for the echo variable
+  extract <- function(model) {
+    beta <- round(coef(model)[var], 2)
+    pval <- formatC(summary(model)$coefficients[var, 4], format = "f", digits = 4)
+    return(c(Beta = beta, P_value = pval))
+  }
+  
+  row <- data.frame(
+    Variable = var,
+    t(extract(model_hiv_pos)),
+    t(extract(model_hiv_neg)),
+    t(extract(model_overall))
+  )
+  names(row) <- c("Variable", "Beta_HIV_Pos", "P_HIV_Pos", "Beta_HIV_Neg", "P_HIV_Neg", "Beta_Overall", "P_Overall")
+  
+  results_all <- bind_rows(results_all, row)
+}
+
+# Step 6: View results
+View(results_all)
