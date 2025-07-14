@@ -1,0 +1,59 @@
+# Load libraries
+library(readxl)
+library(dplyr)
+library(purrr)
+
+# Step 1: Import data
+data <- read_excel("C:/Users/USER/Desktop/Projects/ECHO-6MW/Dataset_TTEand6MWD.xlsx")
+
+# Step 2: Create derived variables
+data <- data %>%
+  mutate(
+    mmrc_score_1 = as.numeric(mmrc_score_1),
+    lv_ef_mean = rowMeans(select(., lv_ef_ll, lv_ef_ul), na.rm = TRUE),
+    tb_pcp_pna = ifelse(d16_tb == 1 | d17_pcp == 1 | d18_pneumonia == 1, 1, 0),
+    hgb_abnormal = ifelse((sex == 0 & hgb_pft_1 < 13.5) | (sex == 1 & hgb_pft_1 < 12), 1, 0)
+  )
+
+# Step 3: Define covariates
+categorical_vars <- c("race_id_der", "g9_hepatitis_c", "sex", "a1_hiv_st",
+                      "ivdu_status_der", "g1_diabetes", "tb_pcp_pna",
+                      "smoke_status_der", "post_spiro_stat_gli_pft_1_der",
+                      "dlco_stat_binary_neas_pft_1_der", "hgb_abnormal")
+continuous_vars <- c("age_tte_der")
+
+# Step 4: Define predictors to test
+predictors <- c("pasp", "lv_dia_diam", "lv_sys_diam", "lv_septal_thickness", 
+                "lv_post_wall_thickness", "aortic_root_size", "la_diam", 
+                "lv_ef_ll", "lv_ef_ul", "lv_ef_mean", "trv", "rap")
+
+# Step 5: Function to run model for one predictor
+run_models_for_predictor <- function(pred, df) {
+  all_vars <- c(pred, categorical_vars, continuous_vars)
+  fmla <- as.formula(paste("mmrc_score_1 ~", paste(all_vars, collapse = " + ")))
+  model <- lm(fmla, data = df)
+  summary_model <- summary(model)$coefficients
+  if (pred %in% rownames(summary_model)) {
+    data.frame(
+      Predictor = pred,
+      Coefficient = round(summary_model[pred, "Estimate"], 4),
+      P_value = signif(summary_model[pred, "Pr(>|t|)"], 3)
+    )
+  } else {
+    data.frame(Predictor = pred, Coefficient = NA, P_value = NA)
+  }
+}
+
+# Step 6: Run for each group
+results_overall <- map_dfr(predictors, ~run_models_for_predictor(.x, data))
+results_hiv_neg <- map_dfr(predictors, ~run_models_for_predictor(.x, filter(data, a1_hiv_st == 0)))
+results_hiv_pos <- map_dfr(predictors, ~run_models_for_predictor(.x, filter(data, a1_hiv_st == 1)))
+
+# Step 7: Combine
+results <- results_overall %>%
+  rename(Beta_Overall = Coefficient, P_Overall = P_value) %>%
+  left_join(rename(results_hiv_neg, Beta_HIVneg = Coefficient, P_HIVneg = P_value), by = "Predictor") %>%
+  left_join(rename(results_hiv_pos, Beta_HIVpos = Coefficient, P_HIVpos = P_value), by = "Predictor")
+
+# Step 8: View results
+View(results)
