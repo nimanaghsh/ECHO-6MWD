@@ -1,0 +1,77 @@
+# Required packages
+library(readxl)
+library(dplyr)
+library(broom)
+
+# Load dataset
+data <- read_excel("C:/Users/USER/Desktop/Projects/ECHO-6MW/Dataset_TTEand6MWD.xlsx")
+
+# Derived variables
+data$lv_ef_mean <- rowMeans(data[, c("lv_ef_ll", "lv_ef_ul")], na.rm = TRUE)
+data$tb_pcp_pna <- with(data, ifelse(d16_tb == 1 | d17_pcp == 1 | d18_pneumonia == 1, 1, 0))
+data$hgb_abnormal <- with(data, ifelse((sex == 0 & hgb_pft_1 < 13.5) | (sex == 1 & hgb_pft_1 < 12), 1, 0))
+
+# Severity variables
+severity_vars <- c("lvh_severity", "lae_severity", "ard_severity", 
+                   "av_severity", "mv_severity", "pv_severity", "tv_severity")
+
+# Covariates
+categorical_vars <- c("race_id_der", "g9_hepatitis_c", "sex", "a1_hiv_st",
+                      "ivdu_status_der", "g1_diabetes", "tb_pcp_pna",
+                      "smoke_status_der", "post_spiro_stat_gli_pft_1_der",
+                      "dlco_stat_binary_neas_pft_1_der", "hgb_abnormal")
+continuous_vars <- c("age_tte_der")
+
+# Initialize results
+results_severity <- data.frame()
+
+# Loop through severity variables
+for (var in severity_vars) {
+  
+  # Convert to ordered factor
+  data[[var]] <- factor(data[[var]], levels = c(0, 1, 3, 4),
+                        labels = c("None", "Trace/Borderline", "Moderate", "Severe"),
+                        ordered = TRUE)
+  
+  # Variables for formula
+  covariates_all <- c(categorical_vars, continuous_vars)
+  covariates_hivstripped <- setdiff(covariates_all, "a1_hiv_st")
+  
+  # Subset complete cases for each model
+  sub_data_all <- data[complete.cases(data[, c("dist_meters_1", var, covariates_all)]), ]
+  sub_data_pos <- filter(sub_data_all, a1_hiv_st == 1)
+  sub_data_neg <- filter(sub_data_all, a1_hiv_st == 0)
+  
+  # Create formulas
+  fmla_all <- as.formula(paste("dist_meters_1 ~", var, "+", paste(covariates_all, collapse = " + ")))
+  fmla_pos <- as.formula(paste("dist_meters_1 ~", var, "+", paste(covariates_hivstripped, collapse = " + ")))
+  fmla_neg <- fmla_pos  # same covariates for HIV-
+  
+  # Fit models
+  model_all <- lm(fmla_all, data = sub_data_all)
+  model_pos <- lm(fmla_pos, data = sub_data_pos)
+  model_neg <- lm(fmla_neg, data = sub_data_neg)
+  
+  # Extract .L contrast (linear trend)
+  extract_l_contrast <- function(model, varname) {
+    contrast_term <- paste0(varname, ".L")
+    coef <- coef(summary(model))[contrast_term, ]
+    beta <- round(coef["Estimate"], 2)
+    pval <- formatC(coef["Pr(>|t|)"], format = "f", digits = 4)
+    return(c(Beta = beta, P_value = pval))
+  }
+  
+  row <- data.frame(
+    Variable = var,
+    t(extract_l_contrast(model_pos, var)),
+    t(extract_l_contrast(model_neg, var)),
+    t(extract_l_contrast(model_all, var))
+  )
+  
+  names(row) <- c("Variable", "Beta_HIV_Pos", "P_HIV_Pos", "Beta_HIV_Neg", "P_HIV_Neg", "Beta_Overall", "P_Overall")
+  
+  results_severity <- bind_rows(results_severity, row)
+}
+
+# View results
+View(results_severity)
