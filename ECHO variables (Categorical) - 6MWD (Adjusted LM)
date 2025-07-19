@@ -12,8 +12,10 @@ data$tb_pcp_pna <- with(data, ifelse(d16_tb == 1 | d17_pcp == 1 | d18_pneumonia 
 data$hgb_abnormal <- with(data, ifelse((sex == 0 & hgb_pft_1 < 13.5) | (sex == 1 & hgb_pft_1 < 12), 1, 0))
 
 # Severity variables
-severity_vars <- c("lvh_severity", "lae_severity", "ard_severity", 
-                   "av_severity", "mv_severity", "pv_severity", "tv_severity")
+severity_vars <- c("lvh_severity", "lae_severity", "ard_severity",
+                   "av_abnormality", "av_severity", "mv_abnormality", "mv_severity",
+                   "pv_abnormality", "pv_severity", "tv_abnormality", "tv_severity",
+                   "dd_severity", "lv_syst_dysfxn_sev_der", "ph_prob_der")
 
 # Covariates
 categorical_vars <- c("race_id_der", "g9_hepatitis_c", "sex", "a1_hiv_st",
