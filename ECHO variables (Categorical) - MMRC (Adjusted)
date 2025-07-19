@@ -20,7 +20,7 @@ categorical_vars <- c(
   "lvh_severity", "lae_severity", "ard_severity",
   "av_abnormality", "av_severity", "mv_abnormality", "mv_severity",
   "pv_abnormality", "pv_severity", "tv_abnormality", "tv_severity",
-  "dd_severity", "lv_syst_dysfxn_sev_der", "ph_prob_der"
+  "dd_severity", "lv_syst_dysfxn_sev_der", "ph_prob_der","lvh", "lae", "ard", "av","mv","pv","tv"
 )
 
 # Step 4: Define covariates
