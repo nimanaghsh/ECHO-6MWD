@@ -1,0 +1,64 @@
+# Load libraries
+library(readxl)
+library(dplyr)
+library(purrr)
+
+# Step 1: Load data
+data <- read_excel("C:/Users/USER/Desktop/Projects/ECHO-6MW/Dataset_TTEand6MWD.xlsx")
+
+# Step 2: Derived variables
+data <- data %>%
+  mutate(
+    lv_ef_mean = rowMeans(cbind(lv_ef_ll, lv_ef_ul), na.rm = TRUE),
+    tb_pcp_pna = ifelse(d16_tb == 1 | d17_pcp == 1 | d18_pneumonia == 1, 1, 0),
+    hgb_abnormal = ifelse((sex == 0 & hgb_pft_1 < 13.5) | (sex == 1 & hgb_pft_1 < 12), 1, 0)
+  )
+
+# Step 3: Covariates
+categorical_covars <- c("race_id_der", "g9_hepatitis_c", "sex", "ivdu_status_der", "g1_diabetes",
+                        "tb_pcp_pna", "smoke_status_der", "post_spiro_stat_gli_pft_1_der",
+                        "dlco_stat_binary_neas_pft_1_der", "hgb_abnormal")
+continuous_covars <- c("age_tte_der")
+all_covars <- c(categorical_covars, "a1_hiv_st", continuous_covars)
+no_hiv_covars <- setdiff(all_covars, "a1_hiv_st")
+
+# Step 4: Predictors
+predictors <- c(
+  "lv_dia_diam", "lv_sys_diam", "lv_septal_thickness", "lv_post_wall_thickness",
+  "aortic_root_size", "la_diam", "lv_ef_ll", "lv_ef_ul",
+  "lv_ef_mean", "trv", "rap", "pasp"
+)
+
+# Step 5: Function to run adjusted linear model
+run_linear_model <- function(var, df, covars) {
+  df <- df %>% filter(!is.na(.data[[var]]), !is.na(sgrq_total_score_1))
+  if (n_distinct(df[[var]]) < 2 || nrow(df) < 10) {
+    return(data.frame(Predictor = var, Beta = NA, P_value = NA))
+  }
+  
+  fmla <- as.formula(paste("sgrq_total_score_1 ~", var, "+", paste(covars, collapse = " + ")))
+  model <- tryCatch(lm(fmla, data = df), error = function(e) NULL)
+  if (is.null(model)) return(data.frame(Predictor = var, Beta = NA, P_value = NA))
+  
+  s <- summary(model)$coefficients
+  if (!(var %in% rownames(s))) return(data.frame(Predictor = var, Beta = NA, P_value = NA))
+  
+  beta <- round(s[var, "Estimate"], 3)
+  pval <- signif(s[var, "Pr(>|t|)"], 3)
+  
+  data.frame(Predictor = var, Beta = beta, P_value = pval)
+}
+
+# Step 6: Run models
+results_overall <- map_dfr(predictors, ~run_linear_model(.x, data, all_covars))
+results_hiv_neg <- map_dfr(predictors, ~run_linear_model(.x, filter(data, a1_hiv_st == 0), no_hiv_covars))
+results_hiv_pos <- map_dfr(predictors, ~run_linear_model(.x, filter(data, a1_hiv_st == 1), no_hiv_covars))
+
+# Step 7: Merge
+final_results <- results_overall %>%
+  rename(Beta_Overall = Beta, P_Overall = P_value) %>%
+  left_join(rename(results_hiv_neg, Beta_HIVneg = Beta, P_HIVneg = P_value), by = "Predictor") %>%
+  left_join(rename(results_hiv_pos, Beta_HIVpos = Beta, P_HIVpos = P_value), by = "Predictor")
+
+# Step 8: View results
+View(final_results)
