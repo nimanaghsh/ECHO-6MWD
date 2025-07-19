@@ -1,1 +1,74 @@
+# Load libraries
+library(readxl)
+library(dplyr)
+library(purrr)
+
+# Step 1: Load data
+data <- read_excel("C:/Users/USER/Desktop/Projects/ECHO-6MW/Dataset_TTEand6MWD.xlsx")
+
+# Step 2: Derived variables
+data <- data %>%
+  mutate(
+    lv_ef_mean = rowMeans(cbind(lv_ef_ll, lv_ef_ul), na.rm = TRUE),
+    tb_pcp_pna = ifelse(d16_tb == 1 | d17_pcp == 1 | d18_pneumonia == 1, 1, 0),
+    hgb_abnormal = ifelse((sex == 0 & hgb_pft_1 < 13.5) | (sex == 1 & hgb_pft_1 < 12), 1, 0),
+    h1_cough = as.numeric(h1_cough)
+  )
+
+# Step 3: Covariates
+categorical_covars <- c(
+  "race_id_der", "g9_hepatitis_c", "sex", "ivdu_status_der", "g1_diabetes",
+  "tb_pcp_pna", "smoke_status_der", "post_spiro_stat_gli_pft_1_der",
+  "dlco_stat_binary_neas_pft_1_der", "hgb_abnormal"
+)
+continuous_covars <- c("age_tte_der")
+all_covars <- c(categorical_covars, "a1_hiv_st", continuous_covars)
+no_hiv_covars <- setdiff(all_covars, "a1_hiv_st")
+
+# Step 4: Predictors
+predictors <- c(
+  "lv_dia_diam", "lv_sys_diam", "lv_septal_thickness", "lv_post_wall_thickness",
+  "aortic_root_size", "la_diam", "lv_ef_ll", "lv_ef_ul",
+  "lv_ef_mean", "trv", "rap", "pasp"
+)
+
+# Step 5: Function to run logistic regression with stability checks
+run_logistic_model <- function(var, df, covars) {
+  df <- df %>% filter(!is.na(.data[[var]]), !is.na(h1_cough))
+  if (n_distinct(df[[var]]) < 2 || sum(df$h1_cough == 1) < 5 || sum(df$h1_cough == 0) < 5) {
+    return(data.frame(Predictor = var, OR = NA, P_value = NA))
+  }
+
+  fmla <- as.formula(paste("h1_cough ~", var, "+", paste(covars, collapse = " + ")))
+  model <- tryCatch(glm(fmla, data = df, family = binomial), error = function(e) NULL)
+  if (is.null(model)) return(data.frame(Predictor = var, OR = NA, P_value = NA))
+
+  s <- summary(model)$coefficients
+  if (!(var %in% rownames(s))) return(data.frame(Predictor = var, OR = NA, P_value = NA))
+
+  OR <- round(exp(s[var, "Estimate"]), 3)
+  P <- signif(s[var, "Pr(>|z|)"], 3)
+
+  # Exclude implausible ORs due to separation or overfitting
+  if (is.na(OR) || OR < 1e-5 || OR > 1e5) {
+    OR <- NA
+    P <- NA
+  }
+
+  data.frame(Predictor = var, OR = OR, P_value = P)
+}
+
+# Step 6: Run models for all three groups
+results_overall <- map_dfr(predictors, ~run_logistic_model(.x, data, all_covars))
+results_hiv_neg <- map_dfr(predictors, ~run_logistic_model(.x, filter(data, a1_hiv_st == 0), no_hiv_covars))
+results_hiv_pos <- map_dfr(predictors, ~run_logistic_model(.x, filter(data, a1_hiv_st == 1), no_hiv_covars))
+
+# Step 7: Combine results
+final_results <- results_overall %>%
+  rename(OR_Overall = OR, P_Overall = P_value) %>%
+  left_join(rename(results_hiv_neg, OR_HIVneg = OR, P_HIVneg = P_value), by = "Predictor") %>%
+  left_join(rename(results_hiv_pos, OR_HIVpos = OR, P_HIVpos = P_value), by = "Predictor")
+
+# Step 8: View results
+View(final_results)
 
