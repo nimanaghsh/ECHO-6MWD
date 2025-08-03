@@ -1,0 +1,220 @@
+# --- Libraries ---
+library(readxl)
+library(dplyr)
+library(tidyr)
+library(broom)
+
+# --- File ---
+file_path <- "C:/Users/USER/Desktop/Projects/ECHO-6MW/Second set/Dataset_TTEand6MWD.xlsx"
+
+# --- Continuous predictors ---
+independent_vars <- c(
+  "lv_dia_diam", "lv_sys_diam", "lv_septal_thickness", "lv_post_wall_thickness",
+  "aortic_root_size", "la_diam", "lv_ef", "trv", "rap", "pasp"
+)
+
+# ---------- Helper: fit logistic grid and return "OR, p" ----------
+run_glm_grid_cont <- function(df, outcome, preds, model_adjustments) {
+  out <- data.frame(matrix(NA, nrow = length(model_adjustments), ncol = length(preds)))
+  rownames(out) <- names(model_adjustments)
+  colnames(out) <- preds
+  
+  for (model_name in names(model_adjustments)) {
+    adjusters <- model_adjustments[[model_name]]
+    
+    for (var in preds) {
+      vars_needed <- c(outcome, var, adjusters)
+      subdat <- df %>%
+        dplyr::select(dplyr::all_of(vars_needed)) %>%
+        tidyr::drop_na() %>%
+        droplevels()
+      
+      # Basic checks: outcome 0/1 with both levels; predictor varies
+      ok_outcome <- outcome %in% names(subdat) &&
+        length(unique(subdat[[outcome]])) == 2
+      ok_predict <- var %in% names(subdat) &&
+        is.numeric(subdat[[var]]) &&
+        length(unique(subdat[[var]])) >= 2
+      if (!ok_outcome || !ok_predict || nrow(subdat) < 5) {
+        out[model_name, var] <- "NA"; next
+      }
+      
+      # Drop adjusters that collapsed to one level
+      valid_adj <- if (length(adjusters)) {
+        adjusters[sapply(adjusters, function(x) {
+          obj <- subdat[[x]]
+          if (is.factor(obj)) nlevels(obj) >= 2 else TRUE
+        })]
+      } else character(0)
+      
+      # Build formula
+      fml <- if (length(valid_adj) == 0) {
+        as.formula(paste(outcome, "~", var))
+      } else {
+        as.formula(paste(outcome, "~", var, "+", paste(valid_adj, collapse = " + ")))
+      }
+      
+      # Fit logistic regression (non-robust SEs)
+      fit <- tryCatch(glm(fml, data = subdat, family = binomial()), error = function(e) NULL)
+      if (is.null(fit)) { out[model_name, var] <- "NA"; next }
+      
+      tt <- tryCatch(broom::tidy(fit), error = function(e) NULL)
+      if (is.null(tt)) { out[model_name, var] <- "NA"; next }
+      
+      # Pull the row for this continuous predictor
+      row <- tt %>% dplyr::filter(term == var)
+      if (nrow(row) != 1) { out[model_name, var] <- "NA"; next }
+      
+      OR <- exp(row$estimate)
+      out[model_name, var] <- sprintf("%.3f, %.3f", OR, row$p.value)
+    }
+  }
+  out
+}
+
+# ---------- Panel prep helpers ----------
+prep_all <- function(path) {
+  read_excel(path) %>%
+    mutate(
+      # outcome 0/1 (coerce safely)
+      mmrc2_1_der = as.integer(mmrc2_1_der),
+      # predictors numeric
+      across(all_of(independent_vars), ~ suppressWarnings(as.numeric(.))),
+      # covariates
+      sex = as.factor(sex),
+      race_id_der = as.factor(race_id_der),
+      bmi_cat_tri_der = as.factor(bmi_cat_tri_der),
+      ever_smok_stat_der = as.factor(ever_smok_stat_der),
+      ever_ivdu_stat_der = as.factor(ever_ivdu_stat_der),
+      g9_hepatitis_c = as.factor(g9_hepatitis_c),
+      anemia_der = as.factor(anemia_der),
+      a1_hiv_st = as.factor(a1_hiv_st),
+      post_old_gli_der = as.factor(post_old_gli_der),
+      dlco_stat_binary_gli_pft_1_der = as.factor(dlco_stat_binary_gli_pft_1_der),
+      # resp infection covariate (0/1) — included from Model 2 in ALL
+      respinfx_der = as.factor(respinfx_der)
+    ) %>% droplevels()
+}
+
+prep_hiv0 <- function(path) {
+  read_excel(path) %>%
+    filter(a1_hiv_st == 0) %>%
+    mutate(
+      mmrc2_1_der = as.integer(mmrc2_1_der),
+      across(all_of(independent_vars), ~ suppressWarnings(as.numeric(.))),
+      sex = as.factor(sex),
+      race_id_der = as.factor(race_id_der),
+      bmi_cat_tri_der = as.factor(bmi_cat_tri_der),
+      ever_smok_stat_der = as.factor(ever_smok_stat_der),
+      ever_ivdu_stat_der = as.factor(ever_ivdu_stat_der),
+      anemia_der = as.factor(anemia_der),
+      post_old_gli_der = as.factor(post_old_gli_der),
+      dlco_stat_binary_gli_pft_1_der = as.factor(dlco_stat_binary_gli_pft_1_der)
+      # NOTE: respinfx_der intentionally excluded in HIV- models
+    ) %>% droplevels()
+}
+
+prep_hiv1 <- function(path) {
+  read_excel(path) %>%
+    filter(a1_hiv_st == 1) %>%
+    mutate(
+      mmrc2_1_der = as.integer(mmrc2_1_der),
+      across(all_of(independent_vars), ~ suppressWarnings(as.numeric(.))),
+      sex = as.factor(sex),
+      race_id_der = as.factor(race_id_der),
+      bmi_cat_tri_der = as.factor(bmi_cat_tri_der),
+      ever_smok_stat_der = as.factor(ever_smok_stat_der),
+      ever_ivdu_stat_der = as.factor(ever_ivdu_stat_der),
+      g9_hepatitis_c = as.factor(g9_hepatitis_c),
+      anemia_der = as.factor(anemia_der),
+      post_old_gli_der = as.factor(post_old_gli_der),
+      dlco_stat_binary_gli_pft_1_der = as.factor(dlco_stat_binary_gli_pft_1_der),
+      # HIV metrics
+      time_living_with_hiv_der = suppressWarnings(as.numeric(time_living_with_hiv_der)),
+      cd4 = suppressWarnings(as.numeric(cd4)),
+      vl_detectable_der = as.factor(vl_detectable_der),
+      # resp infection covariate — included from Model 2 in HIV+
+      respinfx_der = as.factor(respinfx_der)
+    ) %>% droplevels()
+}
+
+# =========================
+# 1) ALL participants (Models 0–3; include respinfx_der from Model 2)
+# =========================
+data_all <- prep_all(file_path)
+model_adjustments_all <- list(
+  "Model 0" = c(),
+  "Model 1" = c("age_tte_der", "sex", "race_id_der"),
+  "Model 2" = c("age_tte_der", "sex", "race_id_der",
+                "bmi_cat_tri_der", "ever_smok_stat_der", "ever_ivdu_stat_der",
+                "g9_hepatitis_c", "anemia_der", "a1_hiv_st", "respinfx_der"),
+  "Model 3" = c("age_tte_der", "sex", "race_id_der",
+                "bmi_cat_tri_der", "ever_smok_stat_der", "ever_ivdu_stat_der",
+                "g9_hepatitis_c", "anemia_der", "a1_hiv_st",
+                "post_old_gli_der", "dlco_stat_binary_gli_pft_1_der",
+                "respinfx_der")
+)
+
+results_mmrc2_all_CONT_NR <- run_glm_grid_cont(
+  df = data_all,
+  outcome = "mmrc2_1_der",
+  preds = independent_vars,
+  model_adjustments = model_adjustments_all
+)
+
+# =========================
+# 2) HIV-negative (Models 0–3; EXCLUDE respinfx_der)
+# =========================
+data_hiv0 <- prep_hiv0(file_path)
+model_adjustments_hiv0 <- list(
+  "Model 0" = c(),
+  "Model 1" = c("age_tte_der", "sex", "race_id_der"),
+  "Model 2" = c("age_tte_der", "sex", "race_id_der",
+                "bmi_cat_tri_der", "ever_smok_stat_der",
+                "ever_ivdu_stat_der", "anemia_der"),
+  "Model 3" = c("age_tte_der", "sex", "race_id_der",
+                "bmi_cat_tri_der", "ever_smok_stat_der", "ever_ivdu_stat_der",
+                "anemia_der", "post_old_gli_der", "dlco_stat_binary_gli_pft_1_der")
+)
+
+results_mmrc2_hiv0_CONT_NR <- run_glm_grid_cont(
+  df = data_hiv0,
+  outcome = "mmrc2_1_der",
+  preds = independent_vars,
+  model_adjustments = model_adjustments_hiv0
+)
+
+# =========================
+# 3) HIV-positive (Models 0–4; include respinfx_der from Model 2)
+# =========================
+data_hiv1 <- prep_hiv1(file_path)
+model_adjustments_hiv1 <- list(
+  "Model 0" = c(),
+  "Model 1" = c("age_tte_der", "sex", "race_id_der"),
+  "Model 2" = c("age_tte_der", "sex", "race_id_der",
+                "bmi_cat_tri_der", "ever_smok_stat_der", "ever_ivdu_stat_der",
+                "g9_hepatitis_c", "anemia_der", "respinfx_der"),
+  "Model 3" = c("age_tte_der", "sex", "race_id_der",
+                "bmi_cat_tri_der", "ever_smok_stat_der", "ever_ivdu_stat_der",
+                "g9_hepatitis_c", "anemia_der",
+                "time_living_with_hiv_der", "cd4", "vl_detectable_der",
+                "respinfx_der"),
+  "Model 4" = c("age_tte_der", "sex", "race_id_der",
+                "bmi_cat_tri_der", "ever_smok_stat_der", "ever_ivdu_stat_der",
+                "g9_hepatitis_c", "anemia_der",
+                "time_living_with_hiv_der", "cd4", "vl_detectable_der",
+                "post_old_gli_der", "dlco_stat_binary_gli_pft_1_der",
+                "respinfx_der")
+)
+
+results_mmrc2_hiv1_CONT_NR <- run_glm_grid_cont(
+  df = data_hiv1,
+  outcome = "mmrc2_1_der",
+  preds = independent_vars,
+  model_adjustments = model_adjustments_hiv1
+)
+
+# --- Inspect in RStudio ---
+View(results_mmrc2_all_CONT_NR)
+View(results_mmrc2_hiv0_CONT_NR)
+View(results_mmrc2_hiv1_CONT_NR)
