@@ -1,0 +1,165 @@
+# --- Libraries ---
+library(readxl)
+library(dplyr)
+library(tidyr)
+library(broom)
+
+# --- Load data ---
+file_path <- "C:/Users/USER/Desktop/Projects/ECHO-6MW/Second set/Dataset_TTEand6MWD.xlsx"
+data0 <- read_excel(file_path)
+
+# --- Continuous predictors ---
+independent_vars <- c(
+  "lv_dia_diam", "lv_sys_diam", "lv_septal_thickness", "lv_post_wall_thickness",
+  "aortic_root_size", "la_diam", "lv_ef", "trv", "rap", "pasp"
+)
+
+# --- Helper: prep a panel (ALL / HIV 0 / HIV 1) ---
+prep_panel <- function(df, hiv = c("all","0","1")) {
+  hiv <- match.arg(hiv)
+  if (hiv == "0") df <- df %>% filter(a1_hiv_st == 0)
+  if (hiv == "1") df <- df %>% filter(a1_hiv_st == 1)
+
+  df %>%
+    mutate(
+      # outcome & predictors numeric (guard if Excel imported as text)
+      dist_meters_1 = suppressWarnings(as.numeric(dist_meters_1)),
+      across(all_of(independent_vars), ~ suppressWarnings(as.numeric(.))),
+      # covariates as factors
+      sex = as.factor(sex),
+      race_id_der = as.factor(race_id_der),
+      bmi_cat_tri_der = as.factor(bmi_cat_tri_der),
+      ever_smok_stat_der = as.factor(ever_smok_stat_der),
+      ever_ivdu_stat_der = as.factor(ever_ivdu_stat_der),
+      g9_hepatitis_c = as.factor(g9_hepatitis_c),
+      anemia_der = as.factor(anemia_der),
+      a1_hiv_st = as.factor(a1_hiv_st),
+      post_old_gli_der = as.factor(post_old_gli_der),
+      dlco_stat_binary_gli_pft_1_der = as.factor(dlco_stat_binary_gli_pft_1_der),
+      # keep available (only used in ALL/HIV1 models)
+      respinfx_der = as.factor(respinfx_der),
+      # HIV metrics (used only in HIV+ model sets; harmless otherwise)
+      vl_detectable_der = as.factor(vl_detectable_der),
+      time_living_with_hiv_der = suppressWarnings(as.numeric(time_living_with_hiv_der)),
+      cd4 = suppressWarnings(as.numeric(cd4))
+    )
+}
+
+# --- Helper: run grid of models; return "beta, p" per predictor (NON-robust SEs) ---
+run_models_nonrobust <- function(df, outcome, preds, model_adjustments) {
+  out <- data.frame(matrix(NA, nrow = length(model_adjustments), ncol = length(preds)))
+  rownames(out) <- names(model_adjustments)
+  colnames(out) <- preds
+
+  for (model_name in names(model_adjustments)) {
+    adjusters <- model_adjustments[[model_name]]
+    for (var in preds) {
+      vars_needed <- c(outcome, var, adjusters)
+      subdat <- df %>% select(all_of(vars_needed)) %>% drop_na()
+      # basic checks
+      if (!is.numeric(subdat[[outcome]]) || sd(subdat[[outcome]]) == 0 ||
+          !is.numeric(subdat[[var]]) || sd(subdat[[var]]) == 0 || nrow(subdat) < 5) {
+        out[model_name, var] <- "NA"; next
+      }
+      # build formula
+      fml <- if (length(adjusters) == 0) {
+        as.formula(paste(outcome, "~", var))
+      } else {
+        as.formula(paste(outcome, "~", var, "+", paste(adjusters, collapse = " + ")))
+      }
+      fit <- tryCatch(lm(fml, data = subdat, na.action = na.exclude), error = function(e) NULL)
+      if (is.null(fit)) { out[model_name, var] <- "NA"; next }
+      tt <- broom::tidy(fit)
+      main_row <- dplyr::filter(tt, term == var)
+      out[model_name, var] <- if (nrow(main_row) == 1 &&
+                                  is.finite(main_row$estimate) &&
+                                  is.finite(main_row$p.value)) {
+        sprintf("%.3f, %.3f", main_row$estimate, main_row$p.value)
+      } else "NA"
+    }
+  }
+  out
+}
+
+# =========================
+# 1) ALL participants (Models 0–3; INCLUDE respinfx_der from Model 2)
+# =========================
+data_all <- prep_panel(data0, "all")
+
+model_adjustments_all <- list(
+  "Model 0" = c(),
+  "Model 1" = c("age_tte_der", "sex", "race_id_der"),
+  "Model 2" = c("age_tte_der", "sex", "race_id_der",
+                "bmi_cat_tri_der", "ever_smok_stat_der", "ever_ivdu_stat_der",
+                "g9_hepatitis_c", "anemia_der", "a1_hiv_st", "respinfx_der"),
+  "Model 3" = c("age_tte_der", "sex", "race_id_der",
+                "bmi_cat_tri_der", "ever_smok_stat_der", "ever_ivdu_stat_der",
+                "g9_hepatitis_c", "anemia_der", "a1_hiv_st",
+                "post_old_gli_der", "dlco_stat_binary_gli_pft_1_der", "respinfx_der")
+)
+
+results_6mwd_all_NR <- run_models_nonrobust(
+  df = data_all,
+  outcome = "dist_meters_1",
+  preds = independent_vars,
+  model_adjustments = model_adjustments_all
+)
+
+# =========================
+# 2) HIV-negative (Models 0–3; EXCLUDE respinfx_der from all models)
+# =========================
+data_hiv0 <- prep_panel(data0, "0")
+
+model_adjustments_hiv0 <- list(
+  "Model 0" = c(),
+  "Model 1" = c("age_tte_der", "sex", "race_id_der"),
+  "Model 2" = c("age_tte_der", "sex", "race_id_der",
+                "bmi_cat_tri_der", "ever_smok_stat_der", "ever_ivdu_stat_der",
+                "anemia_der"),
+  "Model 3" = c("age_tte_der", "sex", "race_id_der",
+                "bmi_cat_tri_der", "ever_smok_stat_der", "ever_ivdu_stat_der",
+                "anemia_der", "post_old_gli_der", "dlco_stat_binary_gli_pft_1_der")
+)
+
+results_6mwd_hiv0_NR <- run_models_nonrobust(
+  df = data_hiv0,
+  outcome = "dist_meters_1",
+  preds = independent_vars,
+  model_adjustments = model_adjustments_hiv0
+)
+
+# =========================
+# 3) HIV-positive (Models 0–4; INCLUDE respinfx_der from Model 2)
+# =========================
+data_hiv1 <- prep_panel(data0, "1")
+
+model_adjustments_hiv1 <- list(
+  "Model 0" = c(),
+  "Model 1" = c("age_tte_der", "sex", "race_id_der"),
+  "Model 2" = c("age_tte_der", "sex", "race_id_der",
+                "bmi_cat_tri_der", "ever_smok_stat_der", "ever_ivdu_stat_der",
+                "g9_hepatitis_c", "anemia_der", "respinfx_der"),
+  "Model 3" = c("age_tte_der", "sex", "race_id_der",
+                "bmi_cat_tri_der", "ever_smok_stat_der", "ever_ivdu_stat_der",
+                "g9_hepatitis_c", "anemia_der",
+                "time_living_with_hiv_der", "cd4", "vl_detectable_der",
+                "respinfx_der"),
+  "Model 4" = c("age_tte_der", "sex", "race_id_der",
+                "bmi_cat_tri_der", "ever_smok_stat_der", "ever_ivdu_stat_der",
+                "g9_hepatitis_c", "anemia_der",
+                "time_living_with_hiv_der", "cd4", "vl_detectable_der",
+                "post_old_gli_der", "dlco_stat_binary_gli_pft_1_der",
+                "respinfx_der")
+)
+
+results_6mwd_hiv1_NR <- run_models_nonrobust(
+  df = data_hiv1,
+  outcome = "dist_meters_1",
+  preds = independent_vars,
+  model_adjustments = model_adjustments_hiv1
+)
+
+# --- Inspect in RStudio ---
+View(results_6mwd_all_NR)
+View(results_6mwd_hiv0_NR)
+View(results_6mwd_hiv1_NR)
