@@ -1,0 +1,222 @@
+# --- Libraries ---
+library(readxl)
+library(dplyr)
+library(tidyr)
+library(broom)
+library(MASS)
+
+# --- File ---
+file_path <- "C:/Users/USER/Desktop/Projects/ECHO-6MW/Second set/Dataset_TTEand6MWD.xlsx"
+
+# --- Predictors (continuous) ---
+independent_vars <- c(
+  "lv_dia_diam", "lv_sys_diam", "lv_septal_thickness", "lv_post_wall_thickness",
+  "aortic_root_size", "la_diam", "lv_ef", "trv", "rap", "pasp"
+)
+
+# ---------- Helper to fit polr grid and return "OR, p" ----------
+run_polr_grid <- function(df, outcome, preds, model_adjustments) {
+  out <- data.frame(matrix(NA, nrow = length(model_adjustments), ncol = length(preds)))
+  rownames(out) <- names(model_adjustments)
+  colnames(out) <- preds
+  
+  for (model_name in names(model_adjustments)) {
+    adjusters <- model_adjustments[[model_name]]
+    
+    for (var in preds) {
+      vars_needed <- c(outcome, var, adjusters)
+      subdat <- df %>%
+        dplyr::select(dplyr::all_of(vars_needed)) %>%
+        tidyr::drop_na() %>%
+        droplevels()
+      
+      # Basic checks
+      if (!(outcome %in% names(subdat)) ||
+          nrow(subdat) < 3 ||
+          length(unique(subdat[[outcome]])) < 2 ||
+          !(var %in% names(subdat))) {
+        out[model_name, var] <- "NA"; next
+      }
+      
+      # Drop adjusters that collapsed to 1 level
+      valid_adj <- if (length(adjusters)) {
+        adjusters[sapply(adjusters, function(x) {
+          obj <- subdat[[x]]
+          if (is.factor(obj)) nlevels(obj) >= 2 else TRUE
+        })]
+      } else character(0)
+      
+      # Build formula
+      fml <- if (length(valid_adj) == 0) {
+        as.formula(paste(outcome, "~", var))
+      } else {
+        as.formula(paste(outcome, "~", var, "+", paste(valid_adj, collapse = " + ")))
+      }
+      
+      # Fit polr
+      fit <- tryCatch(MASS::polr(fml, data = subdat, Hess = TRUE), error = function(e) NULL)
+      if (is.null(fit)) { out[model_name, var] <- "NA"; next }
+      
+      tt <- broom::tidy(fit)
+      tt$p.value <- 2 * pnorm(abs(tt$statistic), lower.tail = FALSE)
+      tt <- tt %>% dplyr::filter(!grepl("\\|", term))  # drop thresholds
+      
+      rows_var <- tt %>% dplyr::filter(grepl(paste0("^", var), term) | term == var)
+      if (nrow(rows_var) == 0) { out[model_name, var] <- "NA"; next }
+      
+      rows_var <- rows_var %>% dplyr::mutate(OR = exp(estimate))
+      
+      cell <- if (nrow(rows_var) == 1) {
+        sprintf("%.3f, %.3f", rows_var$OR, rows_var$p.value)
+      } else {
+        lvl <- sub(paste0("^", var), "", rows_var$term)
+        paste(sprintf("%s: %.3f, %.3f", lvl, rows_var$OR, rows_var$p.value), collapse = "; ")
+      }
+      
+      out[model_name, var] <- cell
+    }
+  }
+  out
+}
+
+# ---------- Panel prep helpers ----------
+prep_all <- function(path) {
+  read_excel(path) %>%
+    mutate(
+      # outcome as ordered factor 0<1<2<3<4
+      mmrc_score_1 = ordered(mmrc_score_1, levels = 0:4),
+      # predictors numeric (guard if Excel imported as text)
+      across(all_of(independent_vars), ~ suppressWarnings(as.numeric(.))),
+      # covariates
+      sex = as.factor(sex),
+      race_id_der = as.factor(race_id_der),
+      bmi_cat_tri_der = as.factor(bmi_cat_tri_der),
+      ever_smok_stat_der = as.factor(ever_smok_stat_der),
+      ever_ivdu_stat_der = as.factor(ever_ivdu_stat_der),
+      g9_hepatitis_c = as.factor(g9_hepatitis_c),
+      anemia_der = as.factor(anemia_der),
+      a1_hiv_st = as.factor(a1_hiv_st),
+      post_old_gli_der = as.factor(post_old_gli_der),
+      dlco_stat_binary_gli_pft_1_der = as.factor(dlco_stat_binary_gli_pft_1_der),
+      # NEW covariate (0/1) used in ALL from Model 2+
+      respinfx_der = as.factor(respinfx_der)
+    ) %>% droplevels()
+}
+
+prep_hiv0 <- function(path) {
+  read_excel(path) %>%
+    filter(a1_hiv_st == 0) %>%
+    mutate(
+      mmrc_score_1 = ordered(mmrc_score_1, levels = 0:4),
+      across(all_of(independent_vars), ~ suppressWarnings(as.numeric(.))),
+      sex = as.factor(sex),
+      race_id_der = as.factor(race_id_der),
+      bmi_cat_tri_der = as.factor(bmi_cat_tri_der),
+      ever_smok_stat_der = as.factor(ever_smok_stat_der),
+      ever_ivdu_stat_der = as.factor(ever_ivdu_stat_der),
+      anemia_der = as.factor(anemia_der),
+      post_old_gli_der = as.factor(post_old_gli_der),
+      dlco_stat_binary_gli_pft_1_der = as.factor(dlco_stat_binary_gli_pft_1_der)
+      # NOTE: respinfx_der intentionally NOT required here (per your request)
+    ) %>% droplevels()
+}
+
+prep_hiv1 <- function(path) {
+  read_excel(path) %>%
+    filter(a1_hiv_st == 1) %>%
+    mutate(
+      mmrc_score_1 = ordered(mmrc_score_1, levels = 0:4),
+      across(all_of(independent_vars), ~ suppressWarnings(as.numeric(.))),
+      sex = as.factor(sex),
+      race_id_der = as.factor(race_id_der),
+      bmi_cat_tri_der = as.factor(bmi_cat_tri_der),
+      ever_smok_stat_der = as.factor(ever_smok_stat_der),
+      ever_ivdu_stat_der = as.factor(ever_ivdu_stat_der),
+      g9_hepatitis_c = as.factor(g9_hepatitis_c),
+      anemia_der = as.factor(anemia_der),
+      post_old_gli_der = as.factor(post_old_gli_der),
+      dlco_stat_binary_gli_pft_1_der = as.factor(dlco_stat_binary_gli_pft_1_der),
+      # HIV metrics
+      time_living_with_hiv_der = suppressWarnings(as.numeric(time_living_with_hiv_der)),
+      cd4 = suppressWarnings(as.numeric(cd4)),
+      vl_detectable_der = as.factor(vl_detectable_der),
+      # NEW covariate used in HIV+ from Model 2+
+      respinfx_der = as.factor(respinfx_der)
+    ) %>% droplevels()
+}
+
+# =========================
+# ALL participants (Models 0–3; add respinfx_der from Model 2)
+# =========================
+data_all <- prep_all(file_path)
+model_adjustments_all <- list(
+  "Model 0" = c(),
+  "Model 1" = c("age_tte_der", "sex", "race_id_der"),
+  "Model 2" = c("age_tte_der", "sex", "race_id_der",
+                "bmi_cat_tri_der", "ever_smok_stat_der", "ever_ivdu_stat_der",
+                "g9_hepatitis_c", "anemia_der", "a1_hiv_st", "respinfx_der"),
+  "Model 3" = c("age_tte_der", "sex", "race_id_der", "bmi_cat_tri_der",
+                "ever_smok_stat_der", "ever_ivdu_stat_der", "g9_hepatitis_c",
+                "anemia_der", "a1_hiv_st", "post_old_gli_der",
+                "dlco_stat_binary_gli_pft_1_der", "respinfx_der")
+)
+
+results_mmrc_all <- run_polr_grid(
+  df = data_all, outcome = "mmrc_score_1",
+  preds = independent_vars, model_adjustments = model_adjustments_all
+)
+
+# =========================
+# HIV-negative (Models 0–3; DO NOT add respinfx_der)
+# =========================
+data_hiv0 <- prep_hiv0(file_path)
+model_adjustments_hiv0 <- list(
+  "Model 0" = c(),
+  "Model 1" = c("age_tte_der", "sex", "race_id_der"),
+  "Model 2" = c("age_tte_der", "sex", "race_id_der",
+                "bmi_cat_tri_der", "ever_smok_stat_der",
+                "ever_ivdu_stat_der", "anemia_der"),
+  "Model 3" = c("age_tte_der", "sex", "race_id_der", "bmi_cat_tri_der",
+                "ever_smok_stat_der", "ever_ivdu_stat_der",
+                "anemia_der", "post_old_gli_der",
+                "dlco_stat_binary_gli_pft_1_der")
+)
+
+results_mmrc_hiv0 <- run_polr_grid(
+  df = data_hiv0, outcome = "mmrc_score_1",
+  preds = independent_vars, model_adjustments = model_adjustments_hiv0
+)
+
+# =========================
+# HIV-positive (Models 0–3; add respinfx_der from Model 2)
+# =========================
+model_adjustments_hiv1 <- list(
+  "Model 0" = c(),
+  "Model 1" = c("age_tte_der", "sex", "race_id_der"),
+  "Model 2" = c("age_tte_der", "sex", "race_id_der",
+                "bmi_cat_tri_der", "ever_smok_stat_der", "ever_ivdu_stat_der",
+                "g9_hepatitis_c", "anemia_der", "respinfx_der"),
+  # Add HIV metrics in Model 3
+  "Model 3" = c("age_tte_der", "sex", "race_id_der",
+                "bmi_cat_tri_der", "ever_smok_stat_der", "ever_ivdu_stat_der",
+                "g9_hepatitis_c", "anemia_der",
+                "time_living_with_hiv_der", "cd4", "vl_detectable_der",
+                "respinfx_der"),
+  # Add post_old_gli_der and dlco in Model 4
+  "Model 4" = c("age_tte_der", "sex", "race_id_der",
+                "bmi_cat_tri_der", "ever_smok_stat_der", "ever_ivdu_stat_der",
+                "g9_hepatitis_c", "anemia_der",
+                "time_living_with_hiv_der", "cd4", "vl_detectable_der",
+                "post_old_gli_der", "dlco_stat_binary_gli_pft_1_der",
+                "respinfx_der")
+)
+
+results_mmrc_hiv1 <- run_polr_grid(
+  df = data_hiv1, outcome = "mmrc_score_1",
+  preds = independent_vars, model_adjustments = model_adjustments_hiv1
+)
+
+# --- Inspect ---
+View(results_mmrc_all)
+View(results_mmrc_hiv0)
+View(results_mmrc_hiv1)
