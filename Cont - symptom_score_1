@@ -3,6 +3,7 @@ library(readxl)
 library(dplyr)
 library(tidyr)
 library(broom)
+library(quantreg)
 
 # --- File ---
 file_path <- "C:/Users/USER/Desktop/Projects/ECHO-6MW/Second set/Dataset_TTEand6MWD.xlsx"
@@ -13,12 +14,12 @@ independent_vars <- c(
   "aortic_root_size", "la_diam", "lv_ef", "trv", "rap", "pasp"
 )
 
-# ---------- Helper: run OLS grid and return "beta, p" (non-robust SEs) ----------
-run_models_nonrobust <- function(df, outcome, preds, model_adjustments) {
+# ---------- Helper: run median quantile regression and return "beta, p" ----------
+run_models_quantile <- function(df, outcome, preds, model_adjustments, tau = 0.5) {
   out <- data.frame(matrix(NA, nrow = length(model_adjustments), ncol = length(preds)))
   rownames(out) <- names(model_adjustments)
   colnames(out) <- preds
-
+  
   for (model_name in names(model_adjustments)) {
     adjusters <- model_adjustments[[model_name]]
     for (var in preds) {
@@ -27,50 +28,47 @@ run_models_nonrobust <- function(df, outcome, preds, model_adjustments) {
         dplyr::select(dplyr::all_of(vars_needed)) %>%
         tidyr::drop_na() %>%
         droplevels()
-
+      
       # Checks
       ok_outcome <- outcome %in% names(subdat) &&
-                    is.numeric(subdat[[outcome]]) &&
-                    is.finite(sd(subdat[[outcome]])) &&
-                    sd(subdat[[outcome]]) > 0
+        is.numeric(subdat[[outcome]]) &&
+        length(unique(subdat[[outcome]])) > 1
       ok_predict <- var %in% names(subdat) &&
-                    is.numeric(subdat[[var]]) &&
-                    is.finite(sd(subdat[[var]])) &&
-                    sd(subdat[[var]]) > 0
+        is.numeric(subdat[[var]]) &&
+        length(unique(subdat[[var]])) > 1
       if (!ok_outcome || !ok_predict || nrow(subdat) < 5) {
         out[model_name, var] <- "NA"; next
       }
-
-      # Drop adjusters that collapsed to 1 level after NA filtering
+      
+      # Drop adjusters that collapsed to 1 level
       valid_adj <- if (length(adjusters)) {
         adjusters[sapply(adjusters, function(x) {
           obj <- subdat[[x]]
           if (is.factor(obj)) nlevels(obj) >= 2 else TRUE
         })]
       } else character(0)
-
+      
       # Build formula
       fml <- if (length(valid_adj) == 0) {
         as.formula(paste(outcome, "~", var))
       } else {
         as.formula(paste(outcome, "~", var, "+", paste(valid_adj, collapse = " + ")))
       }
-
-      # Fit OLS (model-based SEs)
-      fit <- tryCatch(lm(fml, data = subdat, na.action = na.exclude),
-                      error = function(e) NULL)
+      
+      # Fit median regression
+      fit <- tryCatch(rq(fml, tau = tau, data = subdat), error = function(e) NULL)
       if (is.null(fit)) { out[model_name, var] <- "NA"; next }
-
-      tt <- tryCatch(broom::tidy(fit), error = function(e) NULL)
+      
+      # Bootstrap SE for p-values
+      tt <- tryCatch(summary(fit, se = "boot", R = 200), error = function(e) NULL)
       if (is.null(tt)) { out[model_name, var] <- "NA"; next }
-
-      main_row <- dplyr::filter(tt, term == var)
-      out[model_name, var] <- if (nrow(main_row) == 1 &&
-                                  is.finite(main_row$estimate) &&
-                                  is.finite(main_row$p.value)) {
-        sprintf("%.3f, %.3f", main_row$estimate, main_row$p.value)
+      
+      if (var %in% rownames(tt$coefficients)) {
+        est <- tt$coefficients[var, 1]
+        pval <- tt$coefficients[var, 4]
+        out[model_name, var] <- sprintf("%.3f, %.3f", est, pval)
       } else {
-        "NA"
+        out[model_name, var] <- "NA"
       }
     }
   }
@@ -81,10 +79,8 @@ run_models_nonrobust <- function(df, outcome, preds, model_adjustments) {
 prep_all <- function(path) {
   read_excel(path) %>%
     mutate(
-      # Outcome numeric (guard if imported as text)
       symptom_score_1 = suppressWarnings(as.numeric(symptom_score_1)),
       across(all_of(independent_vars), ~ suppressWarnings(as.numeric(.))),
-      # Covariates
       sex = as.factor(sex),
       race_id_der = as.factor(race_id_der),
       bmi_cat_tri_der = as.factor(bmi_cat_tri_der),
@@ -95,7 +91,6 @@ prep_all <- function(path) {
       a1_hiv_st = as.factor(a1_hiv_st),
       post_old_gli_der = as.factor(post_old_gli_der),
       dlco_stat_binary_gli_pft_1_der = as.factor(dlco_stat_binary_gli_pft_1_der),
-      # Include from Model 2 in ALL
       respinfx_der = as.factor(respinfx_der)
     ) %>% droplevels()
 }
@@ -114,7 +109,6 @@ prep_hiv0 <- function(path) {
       anemia_der = as.factor(anemia_der),
       post_old_gli_der = as.factor(post_old_gli_der),
       dlco_stat_binary_gli_pft_1_der = as.factor(dlco_stat_binary_gli_pft_1_der)
-      # NOTE: respinfx_der excluded in HIV- models
     ) %>% droplevels()
 }
 
@@ -133,11 +127,9 @@ prep_hiv1 <- function(path) {
       anemia_der = as.factor(anemia_der),
       post_old_gli_der = as.factor(post_old_gli_der),
       dlco_stat_binary_gli_pft_1_der = as.factor(dlco_stat_binary_gli_pft_1_der),
-      # HIV metrics
       time_living_with_hiv_der = suppressWarnings(as.numeric(time_living_with_hiv_der)),
       cd4 = suppressWarnings(as.numeric(cd4)),
       vl_detectable_der = as.factor(vl_detectable_der),
-      # Include from Model 2 in HIV+
       respinfx_der = as.factor(respinfx_der)
     ) %>% droplevels()
 }
@@ -159,11 +151,12 @@ model_adjustments_all <- list(
                 "respinfx_der")
 )
 
-results_symptom_all_CONT_NR <- run_models_nonrobust(
+results_symptom_all_QR <- run_models_quantile(
   df = data_all,
   outcome = "symptom_score_1",
   preds = independent_vars,
-  model_adjustments = model_adjustments_all
+  model_adjustments = model_adjustments_all,
+  tau = 0.5
 )
 
 # =========================
@@ -181,11 +174,12 @@ model_adjustments_hiv0 <- list(
                 "anemia_der", "post_old_gli_der", "dlco_stat_binary_gli_pft_1_der")
 )
 
-results_symptom_hiv0_CONT_NR <- run_models_nonrobust(
+results_symptom_hiv0_QR <- run_models_quantile(
   df = data_hiv0,
   outcome = "symptom_score_1",
   preds = independent_vars,
-  model_adjustments = model_adjustments_hiv0
+  model_adjustments = model_adjustments_hiv0,
+  tau = 0.5
 )
 
 # =========================
@@ -211,14 +205,15 @@ model_adjustments_hiv1 <- list(
                 "respinfx_der")
 )
 
-results_symptom_hiv1_CONT_NR <- run_models_nonrobust(
+results_symptom_hiv1_QR <- run_models_quantile(
   df = data_hiv1,
   outcome = "symptom_score_1",
   preds = independent_vars,
-  model_adjustments = model_adjustments_hiv1
+  model_adjustments = model_adjustments_hiv1,
+  tau = 0.5
 )
 
-# --- Inspect in RStudio ---
-View(results_symptom_all_CONT_NR)
-View(results_symptom_hiv0_CONT_NR)
-View(results_symptom_hiv1_CONT_NR)
+# --- Inspect ---
+View(results_symptom_all_QR)
+View(results_symptom_hiv0_QR)
+View(results_symptom_hiv1_QR)
